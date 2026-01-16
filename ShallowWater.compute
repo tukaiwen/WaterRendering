@@ -1,0 +1,112 @@
+#pragma kernel ShallowWater
+#pragma kernel UpdateBufferCS
+#pragma multi_compile_local __ ENABLE_SHALLOW_WATER_BOUND
+
+RWStructuredBuffer<float> PrevPrevBuffer;
+RWStructuredBuffer<float> PrevBuffer;
+RWStructuredBuffer<float> CurrentBuffer;
+RWTexture2D<float> _ShallowWaterHeightRT;
+
+Texture2D _ShallowObjDepthTexture;
+
+#if defined(ENABLE_SHALLOW_WATER_BOUND)
+Texture2D _ShallowBoundDepthTexture;
+#endif
+
+float4 _ShallowWaterParams1;
+
+int _ShallowWaterSize;
+float TravelSpeed;
+float Damping;
+
+float GetPrevBufferValue(int indexX, int indexY, float fallbackValue)
+{
+    if (indexX <= 0 || indexX >= _ShallowWaterSize - 1 || indexY <= 0 || indexY >= _ShallowWaterSize - 1)
+    {
+        return 0;
+    }
+
+#if defined(ENABLE_SHALLOW_WATER_BOUND)
+    uint2 indexXY = uint2(indexX, indexY);
+    float boundValue = _ShallowBoundDepthTexture[indexXY];
+    if(boundValue != 0)
+    {
+        return fallbackValue;
+    }
+#endif
+    
+    int index = indexX + indexY * _ShallowWaterSize;
+    return PrevBuffer[index];
+}
+
+[numthreads(8, 8, 1)]
+void ShallowWater(uint3 id : SV_DispatchThreadID)
+{
+    if(id.x >= _ShallowWaterSize || id.y >= _ShallowWaterSize)
+    {
+        return;
+    }
+    
+    int index = id.x + id.y * _ShallowWaterSize;
+
+    float height = _ShallowObjDepthTexture[id.xy] * -1 * _ShallowWaterParams1.x;
+    
+    float prevHeight = PrevBuffer[index];
+    float nearHeightTotal = GetPrevBufferValue(id.x, id.y + 1, prevHeight) +
+                            GetPrevBufferValue(id.x, id.y - 1, prevHeight) +
+                            GetPrevBufferValue(id.x + 1, id.y, prevHeight) +
+                            GetPrevBufferValue(id.x - 1, id.y, prevHeight);
+
+    float prevprevHeight = PrevPrevBuffer[index];
+    float outHeight = Damping * (prevHeight + (prevHeight - prevprevHeight)) + TravelSpeed * (nearHeightTotal - prevHeight * 4);
+    if (height < 0)
+    {
+        outHeight = min(height, outHeight);
+    }
+    outHeight = max(outHeight, _ShallowWaterParams1.y);
+    CurrentBuffer[index] = outHeight;
+
+    // offset
+    uint2 offsetIndex = uint2(id.x + 1, id.y + 1);
+    
+    _ShallowWaterHeightRT[offsetIndex] = outHeight;
+}
+
+RWStructuredBuffer<float> NewPrevPrevBuffer;
+RWStructuredBuffer<float> NewPrevBuffer;
+RWStructuredBuffer<float> NewCurrentBuffer;
+
+float4 _ShallowBufferUpdateParams;
+
+[numthreads(8, 8, 1)]
+void UpdateBufferCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= _ShallowWaterSize || id.y >= _ShallowWaterSize)
+    {
+        return;
+    }
+    int index = id.x + id.y * _ShallowWaterSize;
+
+    half2 offset = half2(1, 1);
+#if SHADER_API_D3D11
+        offset = half2(1, -1);
+#endif
+    
+    int beforeXIndex = id.x + floor(_ShallowBufferUpdateParams.x * _ShallowWaterSize);
+    int beforeYIndex = id.y + offset.y * floor(_ShallowBufferUpdateParams.y * _ShallowWaterSize);
+
+    if (beforeXIndex < 0 || beforeXIndex >= _ShallowWaterSize ||
+       beforeYIndex < 0 || beforeYIndex >= _ShallowWaterSize)
+    {
+        NewPrevBuffer[index] = 0;
+        NewPrevPrevBuffer[index] = 0;
+        NewCurrentBuffer[index] = 0;
+        return;
+    }
+
+    int beforeIndex = beforeXIndex + beforeYIndex * _ShallowWaterSize;
+    
+    NewPrevBuffer[index] = PrevBuffer[beforeIndex];
+    NewPrevPrevBuffer[index] = PrevPrevBuffer[beforeIndex];
+    NewCurrentBuffer[index] = CurrentBuffer[beforeIndex];
+}

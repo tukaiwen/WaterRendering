@@ -1,0 +1,89 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+#pragma kernel SSPR
+#pragma kernel FillHole
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWTexture2D<half4> _SSPRReflectionTexture;
+RWTexture2D<float> _SSPRHeightBuffer;
+
+Texture2D<float4> _CameraColorTexture;
+Texture2D<float4> _CameraDepthTexture;
+
+SAMPLER(sampler_CameraDepthTexture);
+SAMPLER(sampler_CameraColorTexture);
+
+float4 _SSPRReflectionSize;
+float _ReflectionPlaneHeight;
+float3 _CameraDirection;
+float _StretchIntensity;
+float _StretchThreshold;
+
+[numthreads(8, 8, 1)]
+void SSPR(uint3 id : SV_DispatchThreadID)
+{
+    // TODO: insert actual code here!
+    _SSPRReflectionTexture[id.xy] = half4(0.0, 0.0, 0.0, 0.0);
+    _SSPRHeightBuffer[id.xy] = HALF_MAX;
+    float2 uv = (id.xy) * _SSPRReflectionSize.zw;
+    float depth = _CameraDepthTexture.SampleLevel(sampler_CameraDepthTexture, uv, 0).r;
+    
+    float linearDepth = Linear01Depth(depth, _ZBufferParams);
+    if (linearDepth > 0.99)
+        return;
+    
+    float3 wpos = ComputeWorldSpacePosition(uv, depth, UNITY_MATRIX_I_VP);
+    if (wpos.y <= _ReflectionPlaneHeight + 0.03)
+        return;
+    
+    float3 rwpos = wpos;
+    rwpos.y = _ReflectionPlaneHeight - (rwpos.y - _ReflectionPlaneHeight);
+
+    float4 rcpos = TransformWorldToHClip(rwpos);
+    float2 ruv = float2(rcpos.x, rcpos.y * _ProjectionParams.x) * rcp(rcpos.w) * 0.5 + 0.5;
+    if (any(ruv) < 0.0 || any(ruv) > 1.0)
+        return;
+    
+    //float heightstretch = abs(rwpos.y - _ReflectionPlaneHeight);
+    //float screenstretch = saturate(abs(ruv.x * 2.0 - 1.0) - _StretchThreshold);
+    //float anglestretch = saturate(-_CameraDirection.y);
+    
+    //ruv.x = 2.0 * ruv.x - 1.0;
+    //ruv.x *= 1 + saturate(1 - abs(heightstretch * anglestretch * screenstretch)) * _StretchIntensity;
+    //ruv.x = saturate(ruv.x * 0.5 + 0.5);
+    
+    
+    uint2 rid = uint2(ruv * _SSPRReflectionSize.xy);
+    
+    if (wpos.y > _SSPRHeightBuffer[rid])
+        return;
+    
+    _SSPRHeightBuffer[rid] = wpos.y;
+    _SSPRReflectionTexture[rid] = _CameraColorTexture.SampleLevel(sampler_CameraColorTexture, uv, 0);
+}
+
+
+
+[numthreads(8, 8, 1)]
+void FillHole(uint3 id : SV_DispatchThreadID)
+{
+    
+    id.xy *= 2;
+    
+    half4 center = _SSPRReflectionTexture[id.xy + uint2(0, 0)];
+    half4 right = _SSPRReflectionTexture[id.xy + uint2(0, 1)];
+    half4 bottom = _SSPRReflectionTexture[id.xy + uint2(1, 0)];
+    half4 bottomRight = _SSPRReflectionTexture[id.xy + uint2(1, 1)];
+    
+    half4 best = center;
+    best = right.a > best.a + 0.5 ? right : best;
+    best = bottom.a > best.a + 0.5 ? bottom : best;
+    best = bottomRight.a > best.a + 0.5 ? bottomRight : best;
+    
+    _SSPRReflectionTexture[id.xy + uint2(0, 0)] = best.a > center.a + 0.5 ? best : center;
+    _SSPRReflectionTexture[id.xy + uint2(0, 1)] = best.a > right.a + 0.5 ? best : right;
+    _SSPRReflectionTexture[id.xy + uint2(1, 0)] = best.a > bottom.a + 0.5 ? best : bottom;
+    _SSPRReflectionTexture[id.xy + uint2(1, 1)] = best.a > bottomRight.a + 0.5 ? best : bottomRight;
+    
+}
